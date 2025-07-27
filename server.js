@@ -76,16 +76,27 @@ wsServer.on("connection", (ws) => {
     }
     // обработка отправки сообщения
     if (receivedMSG.type === "send") {
-      [...wsServer.clients]
-        .filter((o) => o.readyState === WebSocket.OPEN)
-        .forEach((o) => o.send(msg, { binary: isBinary }));
-      logger.info("Message sent to all users");
-    }
+    // Найти пользователя по ws
+    const user = ws.user || userState.find(u => u.name === receivedMSG.name || u.name === receivedMSG.user?.name);
+
+    const messageToSend = {
+      type: "send",
+      message: receivedMSG.message,
+      user: user ? { id: user.id, name: user.name } : null,
+      time: new Date().toLocaleTimeString()
+    };
+
+    [...wsServer.clients]
+      .filter((o) => o.readyState === WebSocket.OPEN)
+      .forEach((o) => o.send(JSON.stringify(messageToSend)));
+
+    logger.info("Message sent to all users");
+  }
+    });
+    [...wsServer.clients]
+      .filter((o) => o.readyState === WebSocket.OPEN)
+      .forEach((o) => o.send(JSON.stringify(userState)));
   });
-  [...wsServer.clients]
-    .filter((o) => o.readyState === WebSocket.OPEN)
-    .forEach((o) => o.send(JSON.stringify(userState)));
-});
 
 const port = process.env.PORT || 3000;
 
