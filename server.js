@@ -11,28 +11,23 @@ const app = express();
 const logger = pino(pinoPretty());
 
 app.use(cors());
-app.use(
-  bodyParser.json({
-    type(req) {
-      return true;
-    },
-  })
-);
+app.use(bodyParser.json());
 app.use((req, res, next) => {
   res.setHeader("Content-Type", "application/json");
   next();
 });
 
 const userState = [];
+const wsUserMap = new Map(); // ws -> user
+
 app.post("/new-user", async (request, response) => {
-  if (Object.keys(request.body).length === 0) {
-    const result = {
-      status: "error",
-      message: "This name is already taken!",
-    };
-    response.status(400).send(JSON.stringify(result)).end();
-  }
   const { name } = request.body;
+  if (!name) {
+    return response.status(400).send(JSON.stringify({
+      status: "error",
+      message: "Name is required!"
+    })).end();
+  }
   const isExist = userState.find((user) => user.name === name);
   if (!isExist) {
     const newUser = {
@@ -40,65 +35,99 @@ app.post("/new-user", async (request, response) => {
       name: name,
     };
     userState.push(newUser);
-    const result = {
+    logger.info(`New user created: ${JSON.stringify(newUser)}`);
+    return response.send(JSON.stringify({
       status: "ok",
       user: newUser,
-    };
-    logger.info(`New user created: ${JSON.stringify(newUser)}`);
-    response.send(JSON.stringify(result)).end();
+    })).end();
   } else {
-    const result = {
+    logger.error(`User with name "${name}" already exist`);
+    return response.status(409).send(JSON.stringify({
       status: "error",
       message: "This name is already taken!",
-    };
-    logger.error(`User with name "${name}" already exist`);
-    response.status(409).send(JSON.stringify(result)).end();
+    })).end();
   }
 });
 
 const server = http.createServer(app);
 const wsServer = new WebSocketServer({ server });
+
 wsServer.on("connection", (ws) => {
   ws.on("message", (msg, isBinary) => {
     const receivedMSG = JSON.parse(msg);
     logger.info(`Message received: ${JSON.stringify(receivedMSG)}`);
-    // обработка выхода пользователя
-    if (receivedMSG.type === "exit") {
-      const idx = userState.findIndex(
-        (user) => user.name === receivedMSG.user.name
-      );
-      userState.splice(idx, 1);
-      [...wsServer.clients]
-        .filter((o) => o.readyState === WebSocket.OPEN)
-        .forEach((o) => o.send(JSON.stringify(userState)));
-      logger.info(`User with name "${receivedMSG.user.name}" has been deleted`);
+
+    // Логин пользователя
+    if (receivedMSG.type === "login") {
+      // Проверка уникальности имени
+      let user = userState.find(u => u.name === receivedMSG.name);
+      if (!user) {
+        user = { id: randomUUID(), name: receivedMSG.name };
+        userState.push(user);
+      }
+      wsUserMap.set(ws, user);
+
+      // Отправляем подтверждение логина и список пользователей
+      ws.send(JSON.stringify({ type: "login", success: true, users: userState }));
+      broadcastUsers();
       return;
     }
-    // обработка отправки сообщения
+
+    // Обработка выхода пользователя
+    if (receivedMSG.type === "exit") {
+      const user = wsUserMap.get(ws);
+      if (user) {
+        const idx = userState.findIndex((u) => u.id === user.id);
+        if (idx !== -1) userState.splice(idx, 1);
+        wsUserMap.delete(ws);
+        broadcastUsers();
+        logger.info(`User with name "${user.name}" has been deleted`);
+      }
+      return;
+    }
+
+    // Обработка отправки сообщения
     if (receivedMSG.type === "send") {
-    // Найти пользователя по ws
-    const user = ws.user || userState.find(u => u.name === receivedMSG.name || u.name === receivedMSG.user?.name);
-
-    const messageToSend = {
-      type: "send",
-      message: receivedMSG.message,
-      user: user ? { id: user.id, name: user.name } : null,
-      time: new Date().toLocaleTimeString()
-    };
-
-    [...wsServer.clients]
-      .filter((o) => o.readyState === WebSocket.OPEN)
-      .forEach((o) => o.send(JSON.stringify(messageToSend)));
-
-    logger.info("Message sent to all users");
-  }
-    });
-    [...wsServer.clients]
-      .filter((o) => o.readyState === WebSocket.OPEN)
-      .forEach((o) => o.send(JSON.stringify(userState)));
+      const user = wsUserMap.get(ws);
+      const messageToSend = {
+        type: "send",
+        message: receivedMSG.message,
+        user: user ? { id: user.id, name: user.name } : null,
+        time: new Date().toLocaleTimeString()
+      };
+      broadcastAll(JSON.stringify(messageToSend));
+      logger.info("Message sent to all users");
+      return;
+    }
   });
 
-const port = process.env.PORT || 3000;
+  ws.on("close", () => {
+    const user = wsUserMap.get(ws);
+    if (user) {
+      const idx = userState.findIndex((u) => u.id === user.id);
+      if (idx !== -1) userState.splice(idx, 1);
+      wsUserMap.delete(ws);
+      broadcastUsers();
+      logger.info(`User with name "${user.name}" disconnected`);
+    }
+  });
+
+  // При подключении отправляем список пользователей
+  ws.send(JSON.stringify({ type: "users", users: userState }));
+});
+
+function broadcastAll(data) {
+  [...wsServer.clients]
+    .filter((o) => o.readyState === WebSocket.OPEN)
+    .forEach((o) => o.send(data));
+}
+
+function broadcastUsers() {
+  const data = JSON.stringify({ type: "users", users: userState });
+  broadcastAll(data);
+}
+
+const port = process.env.PORT || 7070;
 
 const bootstrap = async () => {
   try {
